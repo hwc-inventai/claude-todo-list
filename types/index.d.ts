@@ -9,6 +9,9 @@ export type TrashEntry = TodoItem & { by: 'user' | 'model'; at: number }
 // One counted turn waiting for the next review.
 export type ReviewTurn = { userText: string; answer: string }
 
+// Where the list shows: the band above the prompt, or a pane.
+export type Layout = 'band' | 'side'
+
 export type TodoListState = {
   items: TodoItem[]
   trash: TrashEntry[]
@@ -26,6 +29,7 @@ declare module 'claude-code' {
       selected: string[]
       lastAnswer: string
       pending: PendingTurn[]
+      layout: Layout
     }
   }
 }

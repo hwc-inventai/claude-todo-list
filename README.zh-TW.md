@@ -44,6 +44,7 @@ claude plugin install todo-list@claude-todo-list
 | `/todos refresh` | 根據整段對話逐項檢查：移除不再待辦的事項、補上漏掉的、更新說明 |
 | `/todos clear` | 刪除所有事項，這些事項會記為你刪除的，放進垃圾桶 |
 | `/todos reset` | 清空清單和垃圾桶，所有「不再加回來」的限制也一併解除 |
+| `/todos layout` | 把清單從輸入框上方的區塊移到 pane，再執行一次就移回來。全螢幕且寬度至少 110 欄時，pane 停靠在對話右側；否則顯示在輸入框上方。手動關掉 pane 會把清單移回原處。選擇會沿用到之後的 session |
 | `/todos trash` | 由新到舊列出被移除的事項、說明和移除者 |
 | `/todos restore <編號>` | 把垃圾桶裡的事項放回清單，編號照 `/todos trash` 顯示的為準，寫法和 `delete` 的編號相同。只要有一個編號超出垃圾桶範圍，整次還原就會取消 |
 | `/todos purge <編號>` | 把垃圾桶裡的事項永久刪除，編號照 `/todos trash` 顯示的為準。永久刪除你刪過的事項後，模型就可以再把它加回來 |

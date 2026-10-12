@@ -44,6 +44,7 @@ claude plugin install todo-list@claude-todo-list
 | `/todos refresh` | Reviews each item against the whole conversation: removes items that are no longer open, adds missing ones, and refreshes details. |
 | `/todos clear` | Deletes every item. The items go to the trash as your deletions. |
 | `/todos reset` | Empties the list and the trash, which also lifts every never-add-back block. |
+| `/todos layout` | Moves the list from the band above the prompt to a pane, or back. The pane docks beside the transcript in fullscreen from 110 columns, and sits above the prompt otherwise. Closing the pane puts the list back in the band. The choice carries over to later sessions. |
 | `/todos trash` | Lists the removed items, newest first, with their details and who removed each. |
 | `/todos restore <numbers>` | Puts items from the trash back on the list, numbered as `/todos trash` shows them and written like `delete` numbers. A number past the end of the trash cancels the whole restore. |
 | `/todos purge <numbers>` | Removes entries from the trash for good, numbered as `/todos trash` shows them. Purging an item you deleted lets the model add it back. |

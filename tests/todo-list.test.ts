@@ -187,6 +187,60 @@ test('the focus ring skips the hidden hotkey Buttons and wraps around the rows',
   expect(landed).toEqual(['item-2', 'item-0', 'item-2'])
 })
 
+const PANE = {
+  ...BAND,
+  component: 'Pane',
+  requestId: 'todos',
+  props: { title: 'Todos', isFocused: false, bodyColumns: 40, placement: 'dock' } as never,
+} as const
+
+function panes(on: On) {
+  const opened: string[] = []
+  const closed: string[] = []
+  on('ui.open', (_$, e) => {
+    opened.push(e.id)
+    return { value: { isPlaced: true } }
+  })
+  on('ui.close', (_$, e) => {
+    closed.push(e.id)
+    return { value: undefined }
+  })
+  return { opened, closed }
+}
+
+test('/todos layout moves the list between the band and a pane, and remembers it', async ($, on) => {
+  const { clock } = setup(on, [{ isAnswered: true, text: '{"remove":[],"add":[{"title":"a","detail":"d-a"}]}' }])
+  const { opened, closed } = panes(on)
+  await start($)
+  await turn($, clock, {})
+
+  const moved = await $.command.run({ command: 'todos', args: 'layout', origin, presentation })
+  expect(moved.text).toContain('Moved the list to a pane.')
+  expect(opened).toEqual(['todos'])
+  expect((await shown($)).texts).toEqual(['engine band'])
+  const pane = await $.ui.mount(PANE)
+  const texts = (await pane.findAll({ type: 'Text' })).map(one => one.text.trim())
+  await pane.unmount()
+  expect(texts).toContain('Todos')
+  expect(texts.some(one => one.startsWith('─'))).toBe(false)
+
+  const back = await $.command.run({ command: 'todos', args: 'layout', origin, presentation })
+  expect(back.text).toBe('Moved the list back above the prompt.')
+  expect(closed).toEqual(['todos'])
+  expect((await shown($)).texts.map(one => one.trim())).toContain('Todos')
+
+  const extra = await $.command.run({ command: 'todos', args: 'layout side', origin, presentation })
+  expect(extra.text).toBe('Usage: /todos layout, with nothing after it. Nothing was changed.')
+})
+
+test('a session opens the pane when the list was last moved there', async ($, on) => {
+  setup(on, [], { layout: 'side' })
+  const { opened } = panes(on)
+  await start($)
+  expect(opened).toEqual(['todos'])
+  expect((await shown($)).texts).toEqual(['engine band'])
+})
+
 test('/todos delete removes an item, records it and keeps it from coming back', async ($, on) => {
   const { asked, clock } = setup(on, [
     { isAnswered: true, text: '{"remove":[],"add":[{"title":"a","detail":"d-a"},{"title":"b","detail":"d-b"}]}' },

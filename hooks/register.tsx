@@ -1,7 +1,7 @@
 import { atom, read, update } from 'claude-code'
-import type { EngineInterface, Register } from 'claude-code'
+import type { EngineInterface, Register, RenderInput } from 'claude-code'
 
-import type { PendingTurn, ReviewTurn, TodoItem, TodoListState, TrashEntry } from '../types'
+import type { Layout, PendingTurn, ReviewTurn, TodoItem, TodoListState, TrashEntry } from '../types'
 import {
   MAX_TRASH,
   REVIEW_MIN_ITEMS,
@@ -27,6 +27,10 @@ import {
 
 const MODEL = 'sonnet'
 const STORE_PREFIX = 'session:'
+// Not session-scoped, so the cleanup in session.start leaves it alone.
+const LAYOUT_KEY = 'layout'
+const PANE = 'todos'
+const PANE_TITLE = 'Todos'
 const DAY_MS = 24 * 60 * 60 * 1000
 // Claude Code's own default for cleanupPeriodDays.
 const DEFAULT_CLEANUP_DAYS = 30
@@ -100,6 +104,9 @@ const lastAnswer = atom({ plugin: 'todo-list', key: 'lastAnswer' } as const, '')
 // a hot reload cancels the module's timers: a turn queued as the reload lands
 // waits here, and session.start, which runs again after the reload, picks it up.
 const pending = atom({ plugin: 'todo-list', key: 'pending' } as const, [] as PendingTurn[])
+// Where the list shows: the band above the prompt, or a pane, which the
+// terminal docks beside the transcript in fullscreen from 110 columns.
+const layout = atom({ plugin: 'todo-list', key: 'layout' } as const, 'band' as Layout)
 
 // An entry saved before items had a detail holds plain strings, and one saved
 // before the trash holds the titles the user removed as `done`.
@@ -153,6 +160,8 @@ let queue: Promise<unknown> = Promise.resolve()
 let generation = 0
 // Whether a leave check is scheduled, so focus moves start only one.
 let isWatchingLeave = false
+// Only the band's props carry it; the pane borrows the band's last value.
+let isWorking = false
 
 // The selection as the list holds it now: a deleted item drops out.
 const pickedFrom = (list: readonly TodoItem[], titles: readonly string[]) =>
@@ -597,13 +606,119 @@ async function refresh($: EngineInterface, gen: number): Promise<string> {
   }
 }
 
+// The list as the band or the pane draws it, or null when it is empty. The pane
+// has its own frame, so only the band draws a rule above the list.
+async function drawList($: EngineInterface, e: RenderInput<'AbovePrompt'> | RenderInput<'Pane'>, isBand: boolean) {
+  const [list, current, openTitle, armed, selectedTitles] = await Promise.all([
+    read($, items),
+    read($, focused),
+    read($, detailed),
+    read($, deleting),
+    read($, selected),
+  ])
+  const picked = pickedFrom(list, selectedTitles)
+  // While one item's detail is shown, the band shows that item alone.
+  const opened = list.find(one => one.title === openTitle)
+  if (list.length === 0) {
+    return null
+  }
+
+  const { Box, Button, Text } = $.ui.resolve(e)
+  const numberWidth = labelWidth(list.length)
+
+  return (
+    <Box flexDirection="column">
+      {isBand && <Text dimColor>{'─'.repeat(e.props.bodyColumns)}</Text>}
+      <Text bold>{GUTTER}Todos</Text>
+      {list.map((item, i) => {
+        // The focus ring tracks its stop by position, so every row keeps its
+        // Button in every view; dropping the hidden rows' Buttons would slide
+        // the ring onto the next stop, the first hotkey Button.
+        const button = (
+          <Button key={`${ROW_PREFIX}${i}`} label=" " plain onPress={() => toggleDetails($)} />
+        )
+        if (opened !== undefined && item !== opened) {
+          return (
+            <Box key={`row-${i}`} width={0} height={0} overflow="hidden">
+              {button}
+            </Box>
+          )
+        }
+        // Items stored before parentheses were normalized still need normalizing here.
+        const shown = normalizeParens(item.title)
+        const [, main = shown] = NOTE.exec(shown) ?? []
+        const room = e.props.bodyColumns - GUTTER.length - numberWidth
+        const isFocused = item.title === current
+        const color = picked.includes(item) ? SELECTED_COLOR : undefined
+        const isLong = !isFocused && opened === undefined && cellWidth(shown) > room
+        // The cut may end inside the note.
+        const cut = isLong ? fit(shown, room) : shown
+        const head = cut.slice(0, main.length)
+        const tail = cut.slice(main.length)
+        return (
+          <Box key={`row-${i}`} flexDirection="row">
+            {/* The focus ring always inverts a Button, so the row's Button takes
+                no cells and the dot beside it marks the focus instead. */}
+            <Box width={0} overflow="hidden">
+              {button}
+            </Box>
+            <Text>{isFocused ? '• ' : '  '}</Text>
+            <Text color={color}>{numberLabel(i + 1, numberWidth)}</Text>
+            <Text color={color} wrap={isLong ? 'truncate-end' : 'wrap'}>
+              {head}
+              {tail !== '' && <Text dimColor>{tail}</Text>}
+            </Text>
+            {item.title === armed && (
+              <Text bold color={DELETE_COLOR}>
+                {' '}
+                delete?
+              </Text>
+            )}
+          </Box>
+        )
+      })}
+      {opened !== undefined && (
+        <Box flexDirection="row">
+          <Text>{' '.repeat(GUTTER.length + numberWidth)}</Text>
+          <Text wrap="wrap">{opened.detail || '(No detail. Run /todos refresh to add one.)'}</Text>
+        </Box>
+      )}
+      <Box flexDirection="row">
+        <Text dimColor>
+          {GUTTER}
+          {helpLine(current !== '', armed !== '', opened !== undefined, picked.length)}
+        </Text>
+        {/* Holds the hotkeys out of sight: a drawn hotkey takes the accent color. */}
+        <Box width={0} overflow="hidden">
+          <Button key="next" label="next" hotkey={NEXT_KEY} plain onPress={() => moveFocus($, e.requestId, 1)} />
+          <Button key="previous" label="previous" hotkey={PREVIOUS_KEY} plain onPress={() => moveFocus($, e.requestId, -1)} />
+          <Button key="details" label="details" hotkey={DETAILS_KEY} plain onPress={() => toggleDetails($)} />
+          <Button key="paste" label="paste" hotkey={PASTE_KEY} plain onPress={() => paste($)} />
+          <Button key="select" label="select" hotkey={SELECT_KEY} plain onPress={() => toggleSelected($)} />
+          <Button key="select-all" label="select all" hotkey={SELECT_ALL_KEY} plain onPress={() => toggleAll($)} />
+          <Button key="ask" label="ask" hotkey={ASK_KEY} plain onPress={() => askAbout($, isWorking)} />
+          <Button key="delete" label="delete" hotkey={DELETE_KEY} plain onPress={() => deleteFocused($)} />
+        </Box>
+      </Box>
+    </Box>
+  )
+}
+
+// Moves the list between the band and the pane, and remembers the choice for
+// later sessions.
+async function setLayout($: EngineInterface, where: Layout) {
+  await leave($)
+  await update($, layout, () => where)
+  await $.store.set(LAYOUT_KEY, where)
+}
+
 export const register: Register = on => {
   on('session.start', async ($, e, next) => {
     await $.command.register({
       name: 'todos',
       description:
-        'Show, refresh, clear or reset the open items list, delete some, list, restore or purge removed items, or send them all with a prompt',
-      argumentHint: '[refresh|clear|reset|trash|restore <numbers>|purge <numbers>|delete <numbers>|<prompt>]',
+        'Show, refresh, clear or reset the open items list, delete some, list, restore or purge removed items, move the list beside the transcript, or send them all with a prompt',
+      argumentHint: '[refresh|clear|reset|layout|trash|restore <numbers>|purge <numbers>|delete <numbers>|<prompt>]',
     })
 
     const now = await $.clock.now()
@@ -628,6 +743,21 @@ export const register: Register = on => {
     if (isStored(mine)) {
       await update($, items, () => migrate(mine.items))
       await update($, trash, () => loadTrash(mine))
+    }
+
+    if ((await $.store.get(LAYOUT_KEY)) === 'side') {
+      await update($, layout, () => 'side')
+      // Unasked, the pane waits undrawn on a terminal under 110 columns.
+      void $.ui.open({ id: PANE, title: PANE_TITLE })
+    }
+
+    return next(e)
+  })
+
+  // Closing the pane by hand puts the list back in the band.
+  on('ui.close', { id: PANE }, async ($, e, next) => {
+    if (e.origin.kind === 'person' && (await read($, layout)) === 'side') {
+      await setLayout($, 'band')
     }
 
     return next(e)
@@ -697,7 +827,25 @@ export const register: Register = on => {
     }
     // Any argument led by one of these words is that subcommand, so a mistyped
     // one is refused instead of going out as a prompt.
-    const sub = /^(reset|trash|restore|purge|delete)(?:\s+|$)(.*)$/s.exec(arg)
+    const sub = /^(reset|layout|trash|restore|purge|delete)(?:\s+|$)(.*)$/s.exec(arg)
+    if (sub?.[1] === 'layout') {
+      if (sub[2] !== '') {
+        return { text: 'Usage: /todos layout, with nothing after it. Nothing was changed.' }
+      }
+      if ((await read($, layout)) === 'side') {
+        await setLayout($, 'band')
+        await $.ui.close({ id: PANE })
+        return { text: 'Moved the list back above the prompt.' }
+      }
+      await setLayout($, 'side')
+      const opened = await $.ui.open({ id: PANE, title: PANE_TITLE })
+      if (!opened.isPlaced) {
+        return { text: `Moved the list to a pane, which is not shown yet: ${opened.reason}` }
+      }
+      return {
+        text: 'Moved the list to a pane. It docks beside the transcript in fullscreen from 110 columns, and sits above the prompt otherwise. Run /todos layout again to move it back.',
+      }
+    }
     if (sub?.[1] === 'reset') {
       if (sub[2] !== '') {
         return { text: 'Usage: /todos reset, with nothing after it. Nothing was changed.' }
@@ -801,7 +949,12 @@ export const register: Register = on => {
     return { text: ['Todos', ...numberedLines(list)].join('\n') }
   })
 
-  on('ui.focus', { component: 'AbovePrompt' }, async ($, e, next) => {
+  on('ui.focus', async ($, e, next) => {
+    // Only the site that shows the list: the band, or this plugin's pane.
+    const site = (await read($, layout)) === 'side' ? 'Pane' : 'AbovePrompt'
+    if (e.component !== site || (site === 'Pane' && e.requestId !== PANE)) {
+      return next(e)
+    }
     if (e.element === undefined) {
       await leave($)
       return next(e)
@@ -830,99 +983,15 @@ export const register: Register = on => {
   })
 
   on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
-    const [list, current, openTitle, armed, selectedTitles] = await Promise.all([
-      read($, items),
-      read($, focused),
-      read($, detailed),
-      read($, deleting),
-      read($, selected),
-    ])
-    const picked = pickedFrom(list, selectedTitles)
-    const { isWorking } = e.props
-    // While one item's detail is shown, the band shows that item alone.
-    const opened = list.find(one => one.title === openTitle)
-    if (list.length === 0 || e.props.hasSurvey) {
+    isWorking = e.props.isWorking
+    if (e.props.hasSurvey || (await read($, layout)) === 'side') {
       return next(e)
     }
+    return (await drawList($, e, true)) ?? next(e)
+  })
 
-    const { Box, Button, Text } = $.ui.resolve(e)
-    const numberWidth = labelWidth(list.length)
-
-    return (
-      <Box flexDirection="column">
-        <Text dimColor>{'─'.repeat(e.props.bodyColumns)}</Text>
-        <Text bold>{GUTTER}Todos</Text>
-        {list.map((item, i) => {
-          // The focus ring tracks its stop by position, so every row keeps its
-          // Button in every view; dropping the hidden rows' Buttons would slide
-          // the ring onto the next stop, the first hotkey Button.
-          const button = (
-            <Button key={`${ROW_PREFIX}${i}`} label=" " plain onPress={() => toggleDetails($)} />
-          )
-          if (opened !== undefined && item !== opened) {
-            return (
-              <Box key={`row-${i}`} width={0} height={0} overflow="hidden">
-                {button}
-              </Box>
-            )
-          }
-          // Items stored before parentheses were normalized still need normalizing here.
-          const shown = normalizeParens(item.title)
-          const [, main = shown] = NOTE.exec(shown) ?? []
-          const room = e.props.bodyColumns - GUTTER.length - numberWidth
-          const isFocused = item.title === current
-          const color = picked.includes(item) ? SELECTED_COLOR : undefined
-          const isLong = !isFocused && opened === undefined && cellWidth(shown) > room
-          // The cut may end inside the note.
-          const cut = isLong ? fit(shown, room) : shown
-          const head = cut.slice(0, main.length)
-          const tail = cut.slice(main.length)
-          return (
-            <Box key={`row-${i}`} flexDirection="row">
-              {/* The focus ring always inverts a Button, so the row's Button takes
-                  no cells and the dot beside it marks the focus instead. */}
-              <Box width={0} overflow="hidden">
-                {button}
-              </Box>
-              <Text>{isFocused ? '• ' : '  '}</Text>
-              <Text color={color}>{numberLabel(i + 1, numberWidth)}</Text>
-              <Text color={color} wrap={isLong ? 'truncate-end' : 'wrap'}>
-                {head}
-                {tail !== '' && <Text dimColor>{tail}</Text>}
-              </Text>
-              {item.title === armed && (
-                <Text bold color={DELETE_COLOR}>
-                  {' '}
-                  delete?
-                </Text>
-              )}
-            </Box>
-          )
-        })}
-        {opened !== undefined && (
-          <Box flexDirection="row">
-            <Text>{' '.repeat(GUTTER.length + numberWidth)}</Text>
-            <Text wrap="wrap">{opened.detail || '(No detail. Run /todos refresh to add one.)'}</Text>
-          </Box>
-        )}
-        <Box flexDirection="row">
-          <Text dimColor>
-            {GUTTER}
-            {helpLine(current !== '', armed !== '', opened !== undefined, picked.length)}
-          </Text>
-          {/* Holds the hotkeys out of sight: a drawn hotkey takes the accent color. */}
-          <Box width={0} overflow="hidden">
-            <Button key="next" label="next" hotkey={NEXT_KEY} plain onPress={() => moveFocus($, e.requestId, 1)} />
-            <Button key="previous" label="previous" hotkey={PREVIOUS_KEY} plain onPress={() => moveFocus($, e.requestId, -1)} />
-            <Button key="details" label="details" hotkey={DETAILS_KEY} plain onPress={() => toggleDetails($)} />
-            <Button key="paste" label="paste" hotkey={PASTE_KEY} plain onPress={() => paste($)} />
-            <Button key="select" label="select" hotkey={SELECT_KEY} plain onPress={() => toggleSelected($)} />
-            <Button key="select-all" label="select all" hotkey={SELECT_ALL_KEY} plain onPress={() => toggleAll($)} />
-            <Button key="ask" label="ask" hotkey={ASK_KEY} plain onPress={() => askAbout($, isWorking)} />
-            <Button key="delete" label="delete" hotkey={DELETE_KEY} plain onPress={() => deleteFocused($)} />
-          </Box>
-        </Box>
-      </Box>
-    )
+  on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
+    const { Text } = $.ui.resolve(e)
+    return (await drawList($, e, false)) ?? <Text dimColor>{GUTTER}No open items.</Text>
   })
 }
